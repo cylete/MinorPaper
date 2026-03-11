@@ -1,0 +1,12 @@
+# Data files (usually large, not for source control)
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.xlsm
+
+# Binary/archives/docs often too large for code-only repo
+*.zip
+*.7z
+*.rar
+*.pdf
