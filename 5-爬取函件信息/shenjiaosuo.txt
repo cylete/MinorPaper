@@ -1,0 +1,126 @@
+# 网页终端爬取，加时间间隔防止触发反爬
+
+(async () => {
+  const STORE_KEY = "szse_wxhj_progress_v2";
+  const PAGE_SIZE = 50; // 降低单页强度
+  const MAX_RETRY = 20;
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const rand = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+
+  const loadState = () => {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); }
+    catch { return {}; }
+  };
+  const saveState = (s) => localStorage.setItem(STORE_KEY, JSON.stringify(s));
+
+  const state = loadState();
+  let rows = Array.isArray(state.rows) ? state.rows : [];
+  let pageNo = Number(state.nextPage || 1);
+  let totalPages = Number(state.totalPages || 0);
+
+  async function fetchOne(p) {
+    const url = new URL("/api/report/ShowReport/data", location.origin);
+    url.searchParams.set("SHOWTYPE", "JSON");
+    url.searchParams.set("CATALOGID", "main_wxhj");
+    url.searchParams.set("PAGENO", String(p));
+    url.searchParams.set("PAGESIZE", String(PAGE_SIZE));
+
+    let lastErr = null;
+    for (let i = 1; i <= MAX_RETRY; i++) {
+      try {
+        const resp = await fetch(url.toString(), {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest"
+          }
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return await resp.json();
+      } catch (e) {
+        lastErr = e;
+        // 指数退避 + 抖动，给风控“冷却”
+        const waitMs = Math.min(120000, 1500 * (2 ** Math.floor(i / 4))) + rand(300, 1200);
+        console.warn(`第${p}页第${i}次失败，等待${Math.round(waitMs/1000)}秒重试`, e);
+        await sleep(waitMs);
+      }
+    }
+    throw new Error(`第 ${p} 页失败: ${lastErr}`);
+  }
+
+  function exportCsv(data, filename = "szse_inquiry_letters.csv") {
+    const header = ["公司代码", "公司简称", "发函日期", "函件类别"];
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const lines = [header.join(",")].concat(
+      data.map(r => header.map(h => esc(r[h])).join(","))
+    );
+    const blob = new Blob(["\uFEFF" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  }
+
+  while (true) {
+    const payload = await fetchOne(pageNo);
+    const block = payload?.[0] || {};
+    const meta = block.metadata || {};
+    const data = block.data || [];
+
+    if (!totalPages) {
+      totalPages = Number(meta.pagecount || 1);
+      console.log("totalPages =", totalPages);
+    }
+
+    for (const r of data) {
+      rows.push({
+        公司代码: String(r.gsdm ?? "").trim(),
+        公司简称: String(r.gsjc ?? "").trim(),
+        发函日期: String(r.fhrq ?? "").trim().slice(0, 10),
+        函件类别: String(r.hjlb ?? "").trim(),
+      });
+    }
+
+    // 每页保存断点
+    saveState({ nextPage: pageNo + 1, totalPages, rows });
+
+    if (pageNo % 10 === 0 || pageNo === totalPages) {
+      console.log(`page ${pageNo}/${totalPages}, rows=${rows.length}`);
+      // 分段导出，防止意外丢失
+      exportCsv(rows, `szse_inquiry_letters_part_until_${pageNo}.csv`);
+    }
+
+    if (pageNo >= totalPages) break;
+
+    pageNo += 1;
+    // 降速：1.2~2.5秒随机间隔
+    await sleep(rand(1200, 2500));
+
+    // 每50页额外冷却
+    if (pageNo % 50 === 0) {
+      console.log("冷却60秒...");
+      await sleep(60000);
+    }
+  }
+
+  // 最终去重导出
+  const seen = new Set();
+  const uniq = [];
+  for (const r of rows) {
+    const k = `${r.公司代码}|${r.公司简称}|${r.发函日期}|${r.函件类别}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(r);
+  }
+
+  exportCsv(uniq, "szse_inquiry_letters.csv");
+  console.log("完成，去重后条数：", uniq.length);
+
+  // 成功后可清理断点：
+  // localStorage.removeItem(STORE_KEY);
+})();
